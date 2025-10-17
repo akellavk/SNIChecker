@@ -10,7 +10,7 @@ MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
 # Файлы
-SNI_FILE="sni_list.txt"
+SNI_FILE="sni.txt"
 WORKING_SNI="working_sni.txt"
 CONFIG_FILE="xui_reality_config.txt"
 TEMP_SNI="temp_sni.txt"
