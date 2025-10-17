@@ -13,11 +13,9 @@ NC='\033[0m' # No Color
 SNI_FILE="sni.txt"
 WORKING_SNI="working_sni.txt"
 CONFIG_FILE="xui_reality_config.txt"
-TEMP_SNI="temp_sni.txt"
-RESULTS_DIR="check_results"
 SERVER_IP="$1"
-MAX_JOBS=10  # Максимальное количество параллельных процессов
-
+MAX_JOBS=5  # Уменьшаем для стабильности
+BATCH_SIZE=1000  # Проверяем по частям
 
 # Проверка аргументов
 if [ -z "$SERVER_IP" ]; then
@@ -26,15 +24,10 @@ if [ -z "$SERVER_IP" ]; then
     exit 1
 fi
 
-# Создаем директорию для результатов
-mkdir -p "$RESULTS_DIR"
-
 # Функция проверки локального файла SNI
 check_local_sni() {
     if [ ! -f "$SNI_FILE" ]; then
         echo -e "${RED}Локальный файл $SNI_FILE не найден!${NC}"
-        echo "Создайте файл sni_list.txt со списком SNI (каждый на новой строке)"
-        echo "Или запустите скрипт при наличии интернета для автоматической загрузки"
         exit 1
     fi
 
@@ -44,15 +37,15 @@ check_local_sni() {
         exit 1
     fi
 
-    echo -e "${GREEN}Использую локальный файл: $count SNI${NC}"
+    echo -e "${GREEN}Обнаружено SNI: $count${NC}"
+    echo -e "${YELLOW}Рекомендуется проверить только первые 1000-5000 SNI${NC}"
 }
 
 # Функция проверки одного SNI
 check_single_sni() {
     local sni="$1"
-    local result_file="$2"
 
-    # Пропускаем пустые строки и комментарии
+    # Пропускаем пустые строки
     if [ -z "$sni" ] || [[ "$sni" == \#* ]]; then
         return
     fi
@@ -64,26 +57,25 @@ check_single_sni() {
     local http_works=0
     local https_works=0
 
-    local http_response=$(curl -I --connect-timeout 5 -m 5 -H "Host: $sni" "http://$SERVER_IP" 2>/dev/null | head -n 1)
+    # Более быстрая проверка с меньшим таймаутом
+    local http_response=$(curl -s -I --connect-timeout 3 -m 3 -H "Host: $sni" "http://$SERVER_IP" 2>/dev/null | head -n 1)
     if [[ $http_response == *"200"* ]] || [[ $http_response == *"301"* ]] || [[ $http_response == *"302"* ]] || [[ $http_response == *"404"* ]]; then
         http_works=1
     fi
 
-    # Проверяем HTTPS
-    local https_response=$(curl -k -I --connect-timeout 5 -m 5 -H "Host: $sni" "https://$SERVER_IP" 2>/dev/null | head -n 1)
-    if [[ $https_response == *"200"* ]] || [[ $https_response == *"301"* ]] || [[ $https_response == *"302"* ]] || [[ $https_response == *"404"* ]]; then
-        https_works=1
+    # Проверяем HTTPS только если HTTP не сработал (экономия времени)
+    if [ $http_works -eq 0 ]; then
+        local https_response=$(curl -s -k -I --connect-timeout 3 -m 3 -H "Host: $sni" "https://$SERVER_IP" 2>/dev/null | head -n 1)
+        if [[ $https_response == *"200"* ]] || [[ $https_response == *"301"* ]] || [[ $https_response == *"302"* ]] || [[ $https_response == *"404"* ]]; then
+            https_works=1
+        fi
     fi
 
-    # Записываем результат
-    if [ $http_works -eq 1 ] || [ $https_works -eq 1 ]; then
-        if [ $http_works -eq 1 ] && [ $https_works -eq 1 ]; then
-            echo "$sni|http+https" >> "$result_file"
-        elif [ $http_works -eq 1 ]; then
-            echo "$sni|http" >> "$result_file"
-        else
-            echo "$sni|https" >> "$result_file"
-        fi
+    # Возвращаем результат
+    if [ $http_works -eq 1 ]; then
+        echo "$sni|http"
+    elif [ $https_works -eq 1 ]; then
+        echo "$sni|https"
     fi
 }
 
@@ -103,81 +95,89 @@ show_progress() {
     printf "${CYAN}] ${YELLOW}%d%%${CYAN} (%d/%d)${NC}" $percentage $current $total
 }
 
-# Основная логика загрузки SNI
+# Основная логика
 echo -e "${YELLOW}Проверка доступности списка SNI...${NC}"
-
-# Используем локальный файл
 check_local_sni
 
-echo -e "${YELLOW}Начинаю проверку SNI для сервера: $SERVER_IP${NC}"
-echo -e "${BLUE}Проверяю оба протокола: HTTP и HTTPS${NC}"
+total_sni=$(wc -l < "$SNI_FILE")
+echo -e "${RED}ВНИМАНИЕ: Найдено $total_sni SNI${NC}"
+echo -e "${YELLOW}Это займет очень много времени!${NC}"
+
+# Спросим пользователя, сколько проверять
+read -p "Сколько SNI проверить? (рекомендуется 100-1000): " check_count
+check_count=${check_count:-1000}
+
+if [ $check_count -gt $total_sni ]; then
+    check_count=$total_sni
+fi
+
+echo -e "${GREEN}Будет проверено: $check_count SNI${NC}"
+echo -e "${YELLOW}Начинаю проверку для сервера: $SERVER_IP${NC}"
 echo -e "${MAGENTA}Режим: асинхронный (до $MAX_JOBS параллельных проверок)${NC}"
 echo "=========================================="
 
 # Очистка старых файлов
 > "$WORKING_SNI"
 > "$CONFIG_FILE"
-rm -f "$RESULTS_DIR"/*.result
 
-# Показываем первые 10 SNI для проверки
-echo -e "${CYAN}Первые 10 SNI для проверки:${NC}"
-head -10 "$SNI_FILE"
-echo "..."
+# Создаем временный файл с ограниченным количеством SNI
+head -n $check_count "$SNI_FILE" > "$SNI_FILE.tmp"
 
-total_sni=$(wc -l < "$SNI_FILE")
+# Основной цикл асинхронной проверки
 current_jobs=0
 completed=0
+total_to_check=$check_count
 
 echo -e "${CYAN}Запускаю асинхронную проверку...${NC}"
 
-# Основной цикл асинхронной проверки
+# Используем именованные пайпы для лучшего управления
+temp_pipe=$(mktemp -u)
+mkfifo "$temp_pipe"
+exec 3<> "$temp_pipe"
+
+# Заполняем пайп
 while read -r sni; do
-    # Пропускаем пустые строки
-    if [ -z "$sni" ]; then
-        continue
-    fi
+    echo "$sni" >&3
+done < "$SNI_FILE.tmp"
 
-    # Запускаем проверку в фоне
-    check_single_sni "$sni" "$RESULTS_DIR/$sni.result" &
+# Запускаем рабочие процессы
+for ((i=0; i<MAX_JOBS; i++)); do
+    (
+        while read -r sni <&3; do
+            result=$(check_single_sni "$sni")
+            if [ -n "$result" ]; then
+                echo "$result" >> "$WORKING_SNI"
+            fi
+            # Обновляем прогресс
+            flock 200
+            completed=$((completed + 1))
+            show_progress $completed $total_to_check
+            flock -u 200
+        done
+    ) &
+done
 
-    ((current_jobs++))
-    ((completed++))
-
-    # Показываем прогресс
-    show_progress $completed $total_sni
-
-    # Если достигли максимума параллельных задач, ждем завершения
-    if [ $current_jobs -ge $MAX_JOBS ]; then
-        wait -n  # Ждем завершения любой задачи
-        ((current_jobs--))
-    fi
-
-done < "$SNI_FILE"
-
-# Ждем завершения всех оставшихся задач
-echo -e "\n${CYAN}Ожидаю завершения оставшихся проверок...${NC}"
+# Ждем завершения
 wait
 
-# Собираем все результаты
-echo -e "${CYAN}Собираю результаты...${NC}"
-for result_file in "$RESULTS_DIR"/*.result; do
-    if [ -f "$result_file" ]; then
-        cat "$result_file" >> "$WORKING_SNI"
-    fi
-done
+# Закрываем пайп
+exec 3>&-
+rm -f "$temp_pipe"
+rm -f "$SNI_FILE.tmp"
+
+echo -e "\n${CYAN}Завершаю проверку...${NC}"
 
 # Статистика
 working_http=$(grep -c "|http$" "$WORKING_SNI" 2>/dev/null || echo 0)
 working_https=$(grep -c "|https$" "$WORKING_SNI" 2>/dev/null || echo 0)
 working_both=$(grep -c "|http+https$" "$WORKING_SNI" 2>/dev/null || echo 0)
-total_working=$((working_http + working_https + working_both))
+total_working=$((working_http + working_https))
 
 echo "=========================================="
 echo -e "${GREEN}Проверка завершена!${NC}"
-echo "Всего проверено: $total_sni"
+echo "Всего проверено: $completed"
 echo -e "Работают по HTTP: ${GREEN}$working_http${NC}"
 echo -e "Работают по HTTPS: ${GREEN}$working_https${NC}"
-echo -e "Работают по обоим: ${GREEN}$working_both${NC}"
 echo -e "Всего рабочих: ${GREEN}$total_working${NC}"
 
 # Создание конфигурации для X-UI
@@ -204,23 +204,16 @@ if [ -s "$WORKING_SNI" ]; then
 
     # Создание конфигурации Reality
     cat > "$CONFIG_FILE" << EOF
-=== РАБОЧИЕ SNI (с протоколами) ===
-$(cat "$WORKING_SNI")
+=== РАБОЧИЕ SNI (первые 20) ===
+$(head -20 "$WORKING_SNI")
 
 === СТАТИСТИКА ===
-Всего проверено: $total_sni
+Всего проверено: $completed
 Работают по HTTP: $working_http
 Работают по HTTPS: $working_https
-Работают по обоим: $working_both
 Всего рабочих: $total_working
 
-=== РЕКОМЕНДАЦИИ ===
-- Для Reality лучше использовать SNI, которые работают по HTTPS
-- Если HTTPS не работает, но работает HTTP - возможно нужен порт 80
-- Reality обычно использует порт 443 (HTTPS)
-
 === КОНФИГУРАЦИЯ VLESS + REALITY ===
-
 Тип: VLESS + Reality
 Адрес: $SERVER_IP
 Порт: 443
@@ -241,7 +234,7 @@ vless://$UUID@$SERVER_IP:443?encryption=none&flow=xtls-rprx-vision&security=real
 EOF
 
     echo -e "${GREEN}Конфигурация сохранена в: $CONFIG_FILE${NC}"
-    echo -e "${GREEN}Рабочие SNI сохранены в: $WORKING_SNI${NC}"
+    echo -e "${GREEN}Все рабочие SNI сохранены в: $WORKING_SNI${NC}"
 
     # Показываем лучшие SNI для Reality
     echo ""
@@ -253,17 +246,6 @@ EOF
 
 else
     echo -e "${RED}Не найдено рабочих SNI!${NC}"
-    echo "Возможные причины:"
-    echo "1. Сервер $SERVER_IP не доступен"
-    echo "2. Порты 80/443 закрыты"
-    echo "3. На сервере не запущен веб-сервер"
-    echo "4. Все SNI заблокированы оператором"
 fi
-
-# Очистка временных файлов
-if [ -f "$TEMP_SNI" ]; then
-    rm -f "$TEMP_SNI"
-fi
-rm -rf "$RESULTS_DIR"
 
 echo -e "${GREEN}Асинхронная проверка завершена!${NC}"
