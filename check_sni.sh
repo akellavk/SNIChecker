@@ -12,12 +12,18 @@ SNI_FILE="sni.txt"
 WORKING_SNI="working_sni.txt"
 CONFIG_FILE="xui_reality_config.txt"
 SERVER_IP="$1"
+MAX_PARALLEL=10  # Максимальное количество параллельных проверок (можно изменить)
 
 # Проверка аргументов
 if [ -z "$SERVER_IP" ]; then
-    echo -e "${RED}Использование: ./check_sni.sh YOUR_SERVER_IP${NC}"
-    echo "Пример: ./check_sni.sh 123.123.123.123"
+    echo -e "${RED}Использование: ./check_sni.sh YOUR_SERVER_IP [MAX_PARALLEL]${NC}"
+    echo "Пример: ./check_sni.sh 123.123.123.123 100"
     exit 1
+fi
+
+# Если указан второй аргумент, используем его как MAX_PARALLEL
+if [ ! -z "$2" ]; then
+    MAX_PARALLEL="$2"
 fi
 
 # Проверка существования файла со SNI
@@ -27,68 +33,141 @@ if [ ! -f "$SNI_FILE" ]; then
     exit 1
 fi
 
-echo -e "${YELLOW}Начинаю проверку SNI для сервера: $SERVER_IP${NC}"
-echo -e "${BLUE}Проверяю оба протокола: HTTP и HTTPS${NC}"
+echo -e "${YELLOW}Начинаю асинхронную проверку SNI для сервера: $SERVER_IP${NC}"
+echo -e "${BLUE}Проверяю оба протокола: HTTP и HTTPS (параллельно, макс. $MAX_PARALLEL задач)${NC}"
 echo "=========================================="
 
 # Очистка старых файлов
 > "$WORKING_SNI"
 > "$CONFIG_FILE"
 
-# Счетчики
-total=0
-working_http=0
-working_https=0
+# Файлы для результатов проверок
+HTTP_RESULTS="http_results.tmp"
+HTTPS_RESULTS="https_results.tmp"
+> "$HTTP_RESULTS"
+> "$HTTPS_RESULTS"
 
-# Функция проверки HTTP
+# Функция для проверки HTTP (запускается в фоне)
 check_http() {
-    local sni=$1
-    response=$(curl -I --connect-timeout 5 -m 5 -H "Host: $sni" "http://$SERVER_IP" 2>/dev/null | head -n 1)
+    local sni="$1"
+    local server_ip="$2"
+    local result_file="$3"
+    response=$(curl -I --connect-timeout 5 -m 5 -H "Host: $sni" "http://$server_ip" 2>/dev/null | head -n 1)
     if [[ $response == *"200"* ]] || [[ $response == *"301"* ]] || [[ $response == *"302"* ]] || [[ $response == *"404"* ]]; then
-        return 0
+        echo "$sni|1" >> "$result_file"
     else
-        return 1
+        echo "$sni|0" >> "$result_file"
     fi
 }
 
-# Функция проверки HTTPS
+# Функция для проверки HTTPS (запускается в фоне)
 check_https() {
-    local sni=$1
-    response=$(curl -k -I --connect-timeout 5 -m 5 -H "Host: $sni" "https://$SERVER_IP" 2>/dev/null | head -n 1)
+    local sni="$1"
+    local server_ip="$2"
+    local result_file="$3"
+    response=$(curl -k -I --connect-timeout 5 -m 5 -H "Host: $sni" "https://$server_ip" 2>/dev/null | head -n 1)
     if [[ $response == *"200"* ]] || [[ $response == *"301"* ]] || [[ $response == *"302"* ]] || [[ $response == *"404"* ]]; then
-        return 0
+        echo "$sni|1" >> "$result_file"
     else
-        return 1
+        echo "$sni|0" >> "$result_file"
     fi
 }
+
+# Функция для управления параллельными задачами
+run_parallel_checks() {
+    local sni="$1"
+    local server_ip="$2"
+    local http_file="$3"
+    local https_file="$4"
+    local pid_file="$5"
+    local running_count_file="$6"
+
+    # Запускаем HTTP и HTTPS в фоне
+    check_http "$sni" "$server_ip" "$http_file" &
+    local http_pid=$!
+    check_https "$sni" "$server_ip" "$https_file" &
+    local https_pid=$!
+
+    # Записываем PID для ожидания
+    echo "$http_pid $https_pid" >> "$pid_file"
+
+    # Увеличиваем счетчик запущенных
+    echo $(( $(cat "$running_count_file" 2>/dev/null || echo 0) + 1 )) > "$running_count_file"
+
+    # Ждем, если достигнут лимит
+    while [ $(cat "$running_count_file") -ge "$MAX_PARALLEL" ]; do
+        # Ждем завершения любой задачи
+        wait -n
+        # Уменьшаем счетчик
+        echo $(( $(cat "$running_count_file") - 1 )) > "$running_count_file"
+    done
+}
+
+# Инициализация файлов для PID и счетчика
+PID_FILE="pids.tmp"
+RUNNING_COUNT="running.tmp"
+> "$PID_FILE"
+> "$RUNNING_COUNT"
+
+# Обработка SNI в цикле
+total=$(wc -l < "$SNI_FILE")
+echo "Всего SNI для проверки: $total"
+current=0
 
 while read -r sni; do
     # Пропускаем пустые строки
     if [ -z "$sni" ]; then
         continue
     fi
-    
+
+    ((current++))
+    echo -n "Запускаю проверку ($current/$total): $sni ... "
+
+    # Запускаем параллельную проверку
+    run_parallel_checks "$sni" "$SERVER_IP" "$HTTP_RESULTS" "$HTTPS_RESULTS" "$PID_FILE" "$RUNNING_COUNT" &
+
+done < "$SNI_FILE"
+
+# Ждем завершения всех фоновых задач
+echo ""
+echo -e "${YELLOW}Ожидаю завершения всех проверок...${NC}"
+wait
+
+# Обрабатываем результаты
+declare -A http_status
+declare -A https_status
+
+# Читаем результаты HTTP
+while read -r line; do
+    sni=$(echo "$line" | cut -d'|' -f1)
+    status=$(echo "$line" | cut -d'|' -f2)
+    http_status["$sni"]="$status"
+done < "$HTTP_RESULTS"
+
+# Читаем результаты HTTPS
+while read -r line; do
+    sni=$(echo "$line" | cut -d'|' -f1)
+    status=$(echo "$line" | cut -d'|' -f2)
+    https_status["$sni"]="$status"
+done < "$HTTPS_RESULTS"
+
+# Подсчет и вывод результатов
+working_http=0
+working_https=0
+total=0
+
+for sni in "${!http_status[@]}"; do
+    # Проверяем наличие в обоих (на случай если один не записался)
+    http_works=${http_status[$sni]:-0}
+    https_works=${https_status[$sni]:-0}
+
     ((total++))
-    echo -n "Проверяю: $sni ... "
-    
-    # Проверяем оба протокола
-    http_works=0
-    https_works=0
-    
-    if check_http "$sni"; then
-        http_works=1
-    fi
-    
-    if check_https "$sni"; then
-        https_works=1
-    fi
-    
-    # Определяем результат
-    if [ $http_works -eq 1 ] || [ $https_works -eq 1 ]; then
-        if [ $http_works -eq 1 ] && [ $https_works -eq 1 ]; then
+
+    if [ "$http_works" -eq 1 ] || [ "$https_works" -eq 1 ]; then
+        if [ "$http_works" -eq 1 ] && [ "$https_works" -eq 1 ]; then
             echo -e "${GREEN}HTTP+HTTPS${NC}"
             protocol="http+https"
-        elif [ $http_works -eq 1 ]; then
+        elif [ "$http_works" -eq 1 ]; then
             echo -e "${GREEN}HTTP${NC}"
             protocol="http"
             ((working_http++))
@@ -101,11 +180,10 @@ while read -r sni; do
     else
         echo -e "${RED}НЕ РАБОТАЕТ${NC}"
     fi
-    
-    # Пауза между запросами
-    sleep 1
-    
-done < "$SNI_FILE"
+done
+
+# Очистка временных файлов
+rm -f "$HTTP_RESULTS" "$HTTPS_RESULTS" "$PID_FILE" "$RUNNING_COUNT"
 
 echo "=========================================="
 echo -e "${GREEN}Проверка завершена!${NC}"
@@ -117,16 +195,16 @@ echo -e "Работают по HTTPS: ${GREEN}$working_https${NC}"
 if [ -s "$WORKING_SNI" ]; then
     echo ""
     echo -e "${YELLOW}Создаю конфигурацию для 3X-UI...${NC}"
-    
+
     # Генерация UUID для VLESS
     UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || echo "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')")
-    
+
     # Генерация короткого ID для Reality
     SHORT_ID=$(openssl rand -hex 8 2>/dev/null || head -c 8 /dev/urandom | base64 | tr -d '=')
-    
+
     # Берем первый рабочий SNI для конфигурации
     FIRST_SNI=$(head -n 1 "$WORKING_SNI" | cut -d'|' -f1)
-    
+
     # Создание конфигурации Reality
     cat > "$CONFIG_FILE" << EOF
 === РАБОЧИЕ SNI (с протоколами) ===
@@ -160,7 +238,7 @@ EOF
 
     echo -e "${GREEN}Конфигурация сохранена в: $CONFIG_FILE${NC}"
     echo -e "${GREEN}Рабочие SNI сохранены в: $WORKING_SNI${NC}"
-    
+
     # Показываем лучшие SNI для Reality
     echo ""
     echo -e "${YELLOW}Лучшие SNI для Reality (работают по HTTPS):${NC}"
