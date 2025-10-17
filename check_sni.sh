@@ -21,8 +21,8 @@ MAX_JOBS=10  # Максимальное количество параллель�
 
 # Проверка аргументов
 if [ -z "$SERVER_IP" ]; then
-    echo -e "${RED}Использование: ./check_sni_async.sh YOUR_SERVER_IP${NC}"
-    echo "Пример: ./check_sni_async.sh 123.123.123.123"
+    echo -e "${RED}Использование: ./check_sni.sh YOUR_SERVER_IP${NC}"
+    echo "Пример: ./check_sni.sh 123.123.123.123"
     exit 1
 fi
 
