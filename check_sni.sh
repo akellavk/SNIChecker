@@ -12,7 +12,7 @@ SNI_FILE="sni.txt"
 WORKING_SNI="working_sni.txt"
 CONFIG_FILE="xui_reality_config.txt"
 SERVER_IP="$1"
-MAX_PARALLEL=10  # Максимальное количество параллельных проверок (можно изменить)
+MAX_PARALLEL=5  # Максимальное количество параллельных проверок (можно изменить)
 
 # Проверка аргументов
 if [ -z "$SERVER_IP" ]; then
@@ -81,6 +81,7 @@ run_parallel_checks() {
     local https_file="$4"
     local pid_file="$5"
     local running_count_file="$6"
+    local max_parallel="$7"
 
     # Запускаем HTTP и HTTPS в фоне
     check_http "$sni" "$server_ip" "$http_file" &
@@ -88,18 +89,19 @@ run_parallel_checks() {
     check_https "$sni" "$server_ip" "$https_file" &
     local https_pid=$!
 
-    # Записываем PID для ожидания
+    # Записываем PID для ожидания (не обязательно, но для отладки)
     echo "$http_pid $https_pid" >> "$pid_file"
 
-    # Увеличиваем счетчик запущенных
-    echo $(( $(cat "$running_count_file" 2>/dev/null || echo 0) + 1 )) > "$running_count_file"
+    # Увеличиваем счетчик запущенных (атомарно)
+    echo $(( $(cat "$running_count_file" 2>/dev/null || echo 0) + 2 )) > "$running_count_file"  # +2, т.к. две задачи
 
-    # Ждем, если достигнут лимит
-    while [ $(cat "$running_count_file") -ge "$MAX_PARALLEL" ]; do
+    # Ждем, если достигнут лимит (используем [[ ]] для безопасного сравнения)
+    while [[ $(cat "$running_count_file" 2>/dev/null || echo 0) -ge $max_parallel ]]; do
         # Ждем завершения любой задачи
         wait -n
-        # Уменьшаем счетчик
-        echo $(( $(cat "$running_count_file") - 1 )) > "$running_count_file"
+        # Уменьшаем счетчик на 1 (поскольку wait -n для одной задачи)
+        local current=$(cat "$running_count_file" 2>/dev/null || echo 0)
+        echo $(( current - 1 )) > "$running_count_file"
     done
 }
 
@@ -107,7 +109,7 @@ run_parallel_checks() {
 PID_FILE="pids.tmp"
 RUNNING_COUNT="running.tmp"
 > "$PID_FILE"
-> "$RUNNING_COUNT"
+echo 0 > "$RUNNING_COUNT"
 
 # Обработка SNI в цикле
 total=$(wc -l < "$SNI_FILE")
@@ -123,8 +125,8 @@ while read -r sni; do
     ((current++))
     echo -n "Запускаю проверку ($current/$total): $sni ... "
 
-    # Запускаем параллельную проверку
-    run_parallel_checks "$sni" "$SERVER_IP" "$HTTP_RESULTS" "$HTTPS_RESULTS" "$PID_FILE" "$RUNNING_COUNT" &
+    # Запускаем параллельную проверку (передаем MAX_PARALLEL)
+    run_parallel_checks "$sni" "$SERVER_IP" "$HTTP_RESULTS" "$HTTPS_RESULTS" "$PID_FILE" "$RUNNING_COUNT" "$MAX_PARALLEL" &
 
 done < "$SNI_FILE"
 
