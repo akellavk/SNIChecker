@@ -79,18 +79,14 @@ run_parallel_checks() {
     local server_ip="$2"
     local http_file="$3"
     local https_file="$4"
-    local pid_file="$5"
-    local running_count_file="$6"
-    local max_parallel="$7"
+    local running_count_file="$5"
+    local max_parallel="$6"
 
     # Запускаем HTTP и HTTPS в фоне
     check_http "$sni" "$server_ip" "$http_file" &
     local http_pid=$!
     check_https "$sni" "$server_ip" "$https_file" &
     local https_pid=$!
-
-    # Записываем PID для ожидания (не обязательно, но для отладки)
-    echo "$http_pid $https_pid" >> "$pid_file"
 
     # Увеличиваем счетчик запущенных (атомарно)
     echo $(( $(cat "$running_count_file" 2>/dev/null || echo 0) + 2 )) > "$running_count_file"  # +2, т.к. две задачи
@@ -105,10 +101,8 @@ run_parallel_checks() {
     done
 }
 
-# Инициализация файлов для PID и счетчика
-PID_FILE="pids.tmp"
+# Инициализация файла для счетчика
 RUNNING_COUNT="running.tmp"
-> "$PID_FILE"
 echo 0 > "$RUNNING_COUNT"
 
 # Обработка SNI в цикле
@@ -125,43 +119,33 @@ while read -r sni; do
     ((current++))
     echo -n "Запускаю проверку ($current/$total): $sni ... "
 
-    # Запускаем параллельную проверку (передаем MAX_PARALLEL)
-    run_parallel_checks "$sni" "$SERVER_IP" "$HTTP_RESULTS" "$HTTPS_RESULTS" "$PID_FILE" "$RUNNING_COUNT" "$MAX_PARALLEL" &
+    # Запускаем параллельную проверку (СИНХРОННО, без &)
+    run_parallel_checks "$sni" "$SERVER_IP" "$HTTP_RESULTS" "$HTTPS_RESULTS" "$RUNNING_COUNT" "$MAX_PARALLEL"
 
 done < "$SNI_FILE"
 
-# Ждем завершения всех фоновых задач
+# Ждем завершения всех фоновых задач (на случай если последние висят)
 echo ""
 echo -e "${YELLOW}Ожидаю завершения всех проверок...${NC}"
 wait
 
-# Обрабатываем результаты
-declare -A http_status
-declare -A https_status
+# Обрабатываем результаты без массивов - используем sort и join
+sort -t'|' -k1,1 "$HTTP_RESULTS" > sorted_http.tmp
+sort -t'|' -k1,1 "$HTTPS_RESULTS" > sorted_https.tmp
 
-# Читаем результаты HTTP
-while read -r line; do
-    sni=$(echo "$line" | cut -d'|' -f1)
-    status=$(echo "$line" | cut -d'|' -f2)
-    http_status["$sni"]="$status"
-done < "$HTTP_RESULTS"
-
-# Читаем результаты HTTPS
-while read -r line; do
-    sni=$(echo "$line" | cut -d'|' -f1)
-    status=$(echo "$line" | cut -d'|' -f2)
-    https_status["$sni"]="$status"
-done < "$HTTPS_RESULTS"
+# Join по SNI (первый столбец)
+join -t'|' -1 1 -2 1 -a 1 -a 2 -e0 sorted_http.tmp sorted_https.tmp > joined_results.tmp
 
 # Подсчет и вывод результатов
 working_http=0
 working_https=0
 total=0
 
-for sni in "${!http_status[@]}"; do
-    # Проверяем наличие в обоих (на случай если один не записался)
-    http_works=${http_status[$sni]:-0}
-    https_works=${https_status[$sni]:-0}
+while read -r line; do
+    if [ -z "$line" ]; then continue; fi
+    sni=$(echo "$line" | cut -d'|' -f1)
+    http_works=$(echo "$line" | cut -d'|' -f2)
+    https_works=$(echo "$line" | cut -d'|' -f3)
 
     ((total++))
 
@@ -182,10 +166,10 @@ for sni in "${!http_status[@]}"; do
     else
         echo -e "${RED}НЕ РАБОТАЕТ${NC}"
     fi
-done
+done < joined_results.tmp
 
 # Очистка временных файлов
-rm -f "$HTTP_RESULTS" "$HTTPS_RESULTS" "$PID_FILE" "$RUNNING_COUNT"
+rm -f "$HTTP_RESULTS" "$HTTPS_RESULTS" "sorted_http.tmp" "sorted_https.tmp" "joined_results.tmp" "$RUNNING_COUNT"
 
 echo "=========================================="
 echo -e "${GREEN}Проверка завершена!${NC}"
