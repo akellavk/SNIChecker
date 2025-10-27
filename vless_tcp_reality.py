@@ -227,6 +227,7 @@ async def run_scan(domains: List[str], cfg: dict, out_dir: Path, fsync_enabled: 
 
 def main():
     ap = argparse.ArgumentParser(description="SNI watcher: читает SNI из папки/файла, ничего не добавляет в списки")
+    ap.add_argument("--host", default="google.com", help="IP или Хост адрес до куда стучаться")
     ap.add_argument("--sni-path", default="sni.txt", help="Путь к папке с *.txt или к одному .txt файлу (по умолчанию: ./sni)")
     ap.add_argument("--out-dir", default="scan_out", help="Каталог для логов (results.jsonl)")
     ap.add_argument("--strict", action="store_true", help="Требовать видимый HTTP-ответ")
@@ -236,6 +237,8 @@ def main():
     args = ap.parse_args()
 
     cfg = dict(CONFIG)
+    if args.host:
+        cfg["server_ip"] = args.host
     if args.strict:
         cfg["strict_http"] = True
     if args.concurrency:
