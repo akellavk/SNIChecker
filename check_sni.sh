@@ -1,4 +1,5 @@
 #!/bin/bash
+# Синхронный скрипт проверки SNI
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -8,22 +9,17 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Файлы
-SNI_FILE="sni.txt"
+SNI_FILE="sni_list.txt"
 WORKING_SNI="working_sni.txt"
 CONFIG_FILE="xui_reality_config.txt"
 SERVER_IP="$1"
-MAX_PARALLEL=5  # Максимальное количество параллельных проверок (можно изменить)
 
 # Проверка аргументов
 if [ -z "$SERVER_IP" ]; then
-    echo -e "${RED}Использование: ./check_sni.sh YOUR_SERVER_IP [MAX_PARALLEL]${NC}"
-    echo "Пример: ./check_sni.sh 123.123.123.123 100"
+    echo -e "${RED}Использование: ./check_sni.sh YOUR_SERVER_IP${NC}"
+    echo "Пример: ./check_sni.sh 123.123.123.123"
+    echo "Пример2: ./check_sni.sh google.com"
     exit 1
-fi
-
-# Если указан второй аргумент, используем его как MAX_PARALLEL
-if [ ! -z "$2" ]; then
-    MAX_PARALLEL="$2"
 fi
 
 # Проверка существования файла со SNI
@@ -33,82 +29,40 @@ if [ ! -f "$SNI_FILE" ]; then
     exit 1
 fi
 
-echo -e "${YELLOW}Начинаю асинхронную проверку SNI для сервера: $SERVER_IP${NC}"
-echo -e "${BLUE}Проверяю оба протокола: HTTP и HTTPS (параллельно, макс. $MAX_PARALLEL задач)${NC}"
+echo -e "${YELLOW}Начинаю проверку SNI для сервера: $SERVER_IP${NC}"
+echo -e "${BLUE}Проверяю оба протокола: HTTP и HTTPS${NC}"
 echo "=========================================="
 
 # Очистка старых файлов
 > "$WORKING_SNI"
 > "$CONFIG_FILE"
 
-# Файлы для результатов проверок
-HTTP_RESULTS="http_results.tmp"
-HTTPS_RESULTS="https_results.tmp"
-> "$HTTP_RESULTS"
-> "$HTTPS_RESULTS"
+# Счетчики
+total=0
+working_http=0
+working_https=0
 
-# Функция для проверки HTTP (запускается в фоне)
+# Функция проверки HTTP
 check_http() {
-    local sni="$1"
-    local server_ip="$2"
-    local result_file="$3"
-    response=$(curl -I --connect-timeout 5 -m 5 -H "Host: $sni" "http://$server_ip" 2>/dev/null | head -n 1)
+    local sni=$1
+    response=$(curl -I --connect-timeout 3 -m 5 -H "Host: $sni" "http://$SERVER_IP" 2>/dev/null | head -n 1)
     if [[ $response == *"200"* ]] || [[ $response == *"301"* ]] || [[ $response == *"302"* ]] || [[ $response == *"404"* ]]; then
-        echo "$sni|1" >> "$result_file"
+        return 0
     else
-        echo "$sni|0" >> "$result_file"
+        return 1
     fi
 }
 
-# Функция для проверки HTTPS (запускается в фоне)
+# Функция проверки HTTPS
 check_https() {
-    local sni="$1"
-    local server_ip="$2"
-    local result_file="$3"
-    response=$(curl -k -I --connect-timeout 5 -m 5 -H "Host: $sni" "https://$server_ip" 2>/dev/null | head -n 1)
+    local sni=$1
+    response=$(curl -k -I --connect-timeout 3 -m 5 -H "Host: $sni" "https://$SERVER_IP" 2>/dev/null | head -n 1)
     if [[ $response == *"200"* ]] || [[ $response == *"301"* ]] || [[ $response == *"302"* ]] || [[ $response == *"404"* ]]; then
-        echo "$sni|1" >> "$result_file"
+        return 0
     else
-        echo "$sni|0" >> "$result_file"
+        return 1
     fi
 }
-
-# Функция для управления параллельными задачами
-run_parallel_checks() {
-    local sni="$1"
-    local server_ip="$2"
-    local http_file="$3"
-    local https_file="$4"
-    local running_count_file="$5"
-    local max_parallel="$6"
-
-    # Запускаем HTTP и HTTPS в фоне
-    check_http "$sni" "$server_ip" "$http_file" &
-    local http_pid=$!
-    check_https "$sni" "$server_ip" "$https_file" &
-    local https_pid=$!
-
-    # Увеличиваем счетчик запущенных (атомарно)
-    echo $(( $(cat "$running_count_file" 2>/dev/null || echo 0) + 2 )) > "$running_count_file"  # +2, т.к. две задачи
-
-    # Ждем, если достигнут лимит (используем [[ ]] для безопасного сравнения)
-    while [[ $(cat "$running_count_file" 2>/dev/null || echo 0) -ge $max_parallel ]]; do
-        # Ждем завершения любой задачи
-        wait -n
-        # Уменьшаем счетчик на 1 (поскольку wait -n для одной задачи)
-        local current=$(cat "$running_count_file" 2>/dev/null || echo 0)
-        echo $(( current - 1 )) > "$running_count_file"
-    done
-}
-
-# Инициализация файла для счетчика
-RUNNING_COUNT="running.tmp"
-echo 0 > "$RUNNING_COUNT"
-
-# Обработка SNI в цикле
-total=$(wc -l < "$SNI_FILE")
-echo "Всего SNI для проверки: $total"
-current=0
 
 while read -r sni; do
     # Пропускаем пустые строки
@@ -116,44 +70,27 @@ while read -r sni; do
         continue
     fi
 
-    ((current++))
-    echo -n "Запускаю проверку ($current/$total): $sni ... "
-
-    # Запускаем параллельную проверку (СИНХРОННО, без &)
-    run_parallel_checks "$sni" "$SERVER_IP" "$HTTP_RESULTS" "$HTTPS_RESULTS" "$RUNNING_COUNT" "$MAX_PARALLEL"
-
-done < "$SNI_FILE"
-
-# Ждем завершения всех фоновых задач (на случай если последние висят)
-echo ""
-echo -e "${YELLOW}Ожидаю завершения всех проверок...${NC}"
-wait
-
-# Обрабатываем результаты без массивов - используем sort и join
-sort -t'|' -k1,1 "$HTTP_RESULTS" > sorted_http.tmp
-sort -t'|' -k1,1 "$HTTPS_RESULTS" > sorted_https.tmp
-
-# Join по SNI (первый столбец)
-join -t'|' -1 1 -2 1 -a 1 -a 2 -e0 sorted_http.tmp sorted_https.tmp > joined_results.tmp
-
-# Подсчет и вывод результатов
-working_http=0
-working_https=0
-total=0
-
-while read -r line; do
-    if [ -z "$line" ]; then continue; fi
-    sni=$(echo "$line" | cut -d'|' -f1)
-    http_works=$(echo "$line" | cut -d'|' -f2)
-    https_works=$(echo "$line" | cut -d'|' -f3)
-
     ((total++))
+    echo -n "Проверяю: $sni ... "
 
-    if [ "$http_works" -eq 1 ] || [ "$https_works" -eq 1 ]; then
-        if [ "$http_works" -eq 1 ] && [ "$https_works" -eq 1 ]; then
+    # Проверяем оба протокола
+    http_works=0
+    https_works=0
+
+    if check_http "$sni"; then
+        http_works=1
+    fi
+
+    if check_https "$sni"; then
+        https_works=1
+    fi
+
+    # Определяем результат
+    if [ $http_works -eq 1 ] || [ $https_works -eq 1 ]; then
+        if [ $http_works -eq 1 ] && [ $https_works -eq 1 ]; then
             echo -e "${GREEN}HTTP+HTTPS${NC}"
             protocol="http+https"
-        elif [ "$http_works" -eq 1 ]; then
+        elif [ $http_works -eq 1 ]; then
             echo -e "${GREEN}HTTP${NC}"
             protocol="http"
             ((working_http++))
@@ -166,10 +103,11 @@ while read -r line; do
     else
         echo -e "${RED}НЕ РАБОТАЕТ${NC}"
     fi
-done < joined_results.tmp
 
-# Очистка временных файлов
-rm -f "$HTTP_RESULTS" "$HTTPS_RESULTS" "sorted_http.tmp" "sorted_https.tmp" "joined_results.tmp" "$RUNNING_COUNT"
+    # Пауза между запросами
+    sleep 1
+
+done < "$SNI_FILE"
 
 echo "=========================================="
 echo -e "${GREEN}Проверка завершена!${NC}"
