@@ -1,5 +1,4 @@
 #!/bin/bash
-# Синхронный скрипт проверки SNI
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -9,7 +8,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Файлы
-SNI_FILE="sni_list.txt"
+SNI_FILE="sni.txt"
 WORKING_SNI="working_sni.txt"
 CONFIG_FILE="xui_reality_config.txt"
 SERVER_IP="$1"
@@ -18,7 +17,6 @@ SERVER_IP="$1"
 if [ -z "$SERVER_IP" ]; then
     echo -e "${RED}Использование: ./check_sni.sh YOUR_SERVER_IP${NC}"
     echo "Пример: ./check_sni.sh 123.123.123.123"
-    echo "Пример2: ./check_sni.sh google.com"
     exit 1
 fi
 
@@ -45,7 +43,7 @@ working_https=0
 # Функция проверки HTTP
 check_http() {
     local sni=$1
-    response=$(curl -I --connect-timeout 3 -m 5 -H "Host: $sni" "http://$SERVER_IP" 2>/dev/null | head -n 1)
+    response=$(curl -I --connect-timeout 5 -m 5 -H "Host: $sni" "http://$SERVER_IP" 2>/dev/null | head -n 1)
     if [[ $response == *"200"* ]] || [[ $response == *"301"* ]] || [[ $response == *"302"* ]] || [[ $response == *"404"* ]]; then
         return 0
     else
@@ -56,7 +54,7 @@ check_http() {
 # Функция проверки HTTPS
 check_https() {
     local sni=$1
-    response=$(curl -k -I --connect-timeout 3 -m 5 -H "Host: $sni" "https://$SERVER_IP" 2>/dev/null | head -n 1)
+    response=$(curl -k -I --connect-timeout 5 -m 5 -H "Host: $sni" "https://$SERVER_IP" 2>/dev/null | head -n 1)
     if [[ $response == *"200"* ]] || [[ $response == *"301"* ]] || [[ $response == *"302"* ]] || [[ $response == *"404"* ]]; then
         return 0
     else
