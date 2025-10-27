@@ -27,7 +27,7 @@ except Exception:
 from tqdm import tqdm  # да, ты это забывал импортить
 
 CONFIG = {
-    "server_ip": "255.255.255.255",   # IP твоего сервера
+    "server_ip": "google.com",   # IP твоего сервера
     "port": 443,   # порт инбаунда
     "health_path": "/",
     "timeout": 5.0, # Сколько ждать ответа от SNI, прежде чем считать его не рабочим. Измеряется в секундах.
