@@ -4,19 +4,13 @@
 ```bash
 # Клонирование репозитория
 git clone https://github.com/akellavk/SNIChecker.git
-```
 
-```bash
 # Создание виртуального окружения
 python -m venv .venv
-```
 
-```bash
 # Активация виртуального окружения
 source .venv/bin/activate
-```
 
-```bash
 # Установка пакетов
 pip install -r requirements.txt
 ```
@@ -41,12 +35,12 @@ cd SNIChecker
 chmod +x check_sni.sh
 
 # Установка необходимых пакетов
-pkg install python git
+pkg install python git curl
 
-# Создание виртуального окружения
+# Создание виртуального окружения (шаг можно пропустить, если не нужно виртуальное окружение)
 python -m venv .venv
 
-# Активация виртуального окружения
+# Активация виртуального окружения (шаг можно пропустить, если не создали виртуальное окружение)
 source .venv/bin/activate
 
 # Установка пакетов
@@ -56,5 +50,7 @@ pip install -r requirements.txt
 nano vless_tcp_reality.py
 
 # Запускаем скрипт
+python check_sni.py google.com
+# или
 python vless_tcp_reality.py
 ```
