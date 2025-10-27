@@ -52,5 +52,5 @@ nano vless_tcp_reality.py
 # Запускаем скрипт
 python check_sni.py google.com
 # или
-python vless_tcp_reality.py
+python vless_tcp_reality.py --host google.com
 ```
